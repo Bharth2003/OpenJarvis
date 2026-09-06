@@ -147,34 +147,73 @@ Write-Ok "Windows build $build"
 # 2. Python check
 # ---------------------------------------------------------------------------
 
-function Test-RealPython {
-    # A candidate is only usable if it actually runs and reports a version.
-    # This rejects the Microsoft Store "App execution alias" stubs: fake
-    # python.exe / python3.exe shims under WindowsApps that are on PATH by
-    # default and merely print "Python was not found" (to stderr, exit code
-    # 9009) instead of launching an interpreter (#895 follow-up).
-    param([string]$Exe)
+# Supported CPython minor range (3.10 - 3.13). 3.14 is excluded until numpy
+# ships cp314 Windows wheels (#432).
+$script:MinPyMinor = 10
+$script:MaxPyMinor = 13
 
-    if (-not $Exe) { return $false }
-    if ($Exe -like '*\WindowsApps\*') { return $false }
+function Get-PythonInfo {
+    # Probe a candidate interpreter; return @{ Path; Major; Minor } or $null.
+    #
+    # Rejects the Microsoft Store "App execution alias" stubs (fake
+    # python.exe / python3.exe under WindowsApps that only print "Python was
+    # not found", exit 9009) both by path and by requiring a successful probe.
+    #
+    # $Exe is the executable to launch; $Pre carries any leading arguments,
+    # used to drive the `py` launcher's version selectors (e.g. -3.13). The
+    # probe prints "<major>.<minor>" then sys.executable, so the caller learns
+    # the concrete interpreter path even when it was reached via the launcher.
+    param([string]$Exe, [string[]]$Pre = @())
 
+    if (-not $Exe) { return $null }
+    if ($Exe -like '*\WindowsApps\*') { return $null }
+
+    $probe = 'import sys; print("%d.%d" % sys.version_info[:2]); print(sys.executable)'
     try {
-        $out = & $Exe --version 2>&1
+        $out = & $Exe @Pre -c $probe 2>&1
     } catch {
-        return $false
+        return $null
     }
-    return ($LASTEXITCODE -eq 0 -and ("$out" -match 'Python\s+\d+\.\d+\.\d+'))
+    if ($LASTEXITCODE -ne 0) { return $null }
+
+    # `& $Exe` yields one array element per output line; normalise to real
+    # newline-separated text (a plain "$out" would join lines with spaces).
+    $lines = @(($out | Out-String) -split "\r?\n" | ForEach-Object { $_.Trim() } | Where-Object { $_ -ne '' })
+    if ($lines.Count -lt 2 -or $lines[0] -notmatch '^(\d+)\.(\d+)$') { return $null }
+    $major = [int]$Matches[1]
+    $minor = [int]$Matches[2]
+
+    $path = $lines[1].Trim()
+    if (-not $path -or $path -like '*\WindowsApps\*') { return $null }
+    return @{ Path = $path; Major = $major; Minor = $minor }
+}
+
+function Test-SupportedPython {
+    param($Info)
+    return ($Info -and $Info.Major -eq 3 -and
+            $Info.Minor -ge $script:MinPyMinor -and $Info.Minor -le $script:MaxPyMinor)
 }
 
 function Get-PythonCommand {
-    # Prefer `python3` (matches our cross-platform helper convention), fall
-    # back to `python` and finally the `py` launcher. Every candidate is
-    # validated with Test-RealPython so a Store-alias stub on PATH can never
-    # shadow a real interpreter. `-All` is used because the stub and a real
-    # install can share the same command name.
+    # Return the path to a SUPPORTED CPython (3.10 - 3.13), or $null.
+    #
+    # An unsupported interpreter must not block a supported one: a user can
+    # have 3.14 as bare `python` (no numpy wheels yet, #432) alongside a usable
+    # 3.13. So prefer the `py` launcher's version-pinned selectors, which pick
+    # a specific version regardless of PATH order, then fall back to bare
+    # command names (skipping WindowsApps stubs via Get-PythonInfo). Only
+    # supported versions are returned; unsupported ones are skipped so the
+    # caller can auto-install a supported one.
+    if (Get-Command py -ErrorAction SilentlyContinue) {
+        foreach ($v in @('3.13', '3.12', '3.11', '3.10')) {
+            $info = Get-PythonInfo -Exe 'py' -Pre @("-$v")
+            if (Test-SupportedPython $info) { return $info.Path }
+        }
+    }
     foreach ($name in @('python3', 'python', 'py')) {
         foreach ($cmd in @(Get-Command $name -All -ErrorAction SilentlyContinue)) {
-            if (Test-RealPython $cmd.Source) { return $cmd.Source }
+            $info = Get-PythonInfo -Exe $cmd.Source
+            if (Test-SupportedPython $info) { return $info.Path }
         }
     }
     return $null
@@ -183,8 +222,14 @@ function Get-PythonCommand {
 Write-Info "Checking Python (3.10 - 3.13)..."
 $pythonExe = Get-PythonCommand
 if (-not $pythonExe) {
-    Write-Info "Python not on PATH - attempting auto-install via winget..."
-    $pythonExe = Install-WithWinget -WingetId 'Python.Python.3.13' -CommandName 'python'
+    Write-Info "No supported Python (3.10-3.13) found - attempting auto-install via winget..."
+    if (Install-WithWinget -WingetId 'Python.Python.3.13' -CommandName 'python') {
+        # Re-resolve instead of trusting the winget command name: bare `python`
+        # may still point at an unsupported version (e.g. 3.14), but
+        # Get-PythonCommand locates the freshly installed 3.13 via the py
+        # launcher.
+        $pythonExe = Get-PythonCommand
+    }
     if (-not $pythonExe) {
         Write-Fail @"
 Python 3.10 - 3.13 not found and auto-install via winget failed.
