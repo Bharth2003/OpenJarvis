@@ -147,12 +147,35 @@ Write-Ok "Windows build $build"
 # 2. Python check
 # ---------------------------------------------------------------------------
 
+function Test-RealPython {
+    # A candidate is only usable if it actually runs and reports a version.
+    # This rejects the Microsoft Store "App execution alias" stubs: fake
+    # python.exe / python3.exe shims under WindowsApps that are on PATH by
+    # default and merely print "Python was not found" (to stderr, exit code
+    # 9009) instead of launching an interpreter (#895 follow-up).
+    param([string]$Exe)
+
+    if (-not $Exe) { return $false }
+    if ($Exe -like '*\WindowsApps\*') { return $false }
+
+    try {
+        $out = & $Exe --version 2>&1
+    } catch {
+        return $false
+    }
+    return ($LASTEXITCODE -eq 0 -and ("$out" -match 'Python\s+\d+\.\d+\.\d+'))
+}
+
 function Get-PythonCommand {
-    # Prefer `python3` (matches our cross-platform helper convention),
-    # fall back to `python` (the Windows store / python.org default).
-    foreach ($name in @('python3', 'python')) {
-        $cmd = Get-Command $name -ErrorAction SilentlyContinue
-        if ($cmd) { return $cmd.Source }
+    # Prefer `python3` (matches our cross-platform helper convention), fall
+    # back to `python` and finally the `py` launcher. Every candidate is
+    # validated with Test-RealPython so a Store-alias stub on PATH can never
+    # shadow a real interpreter. `-All` is used because the stub and a real
+    # install can share the same command name.
+    foreach ($name in @('python3', 'python', 'py')) {
+        foreach ($cmd in @(Get-Command $name -All -ErrorAction SilentlyContinue)) {
+            if (Test-RealPython $cmd.Source) { return $cmd.Source }
+        }
     }
     return $null
 }
