@@ -50,6 +50,33 @@ jarvis ask -t 0.2 "List the planets in our solar system"
 jarvis ask --json "What is 2+2?"
 ```
 
+## Voice and wake word
+
+`jarvis chat` can run hands-free. Both modes reuse the same STT → agent → TTS
+turn, so history, tools, and personas behave exactly as in text chat.
+
+```bash
+# Voice I/O: type, or press Enter to speak; silence stops recording.
+jarvis chat --voice
+
+# Wake word: say "Hey Jarvis", speak your request, hear the answer, repeat.
+# Runs offline and loops until Ctrl+C.
+jarvis chat --wake        # alias: --hey-jarvis (implies --voice)
+```
+
+Install the dependencies once:
+
+```bash
+# Microphone + local STT/TTS
+uv sync --extra speech
+# Offline "hey_jarvis" wake-word model (pulls openwakeword + onnxruntime)
+uv sync --extra wake
+```
+
+The wake word is detected on-device by
+[openwakeword](https://github.com/dscripka/openWakeWord)'s pretrained
+`hey_jarvis` model — no audio leaves your machine to trigger it.
+
 ## Configuration Reference
 
 The preset writes this to `~/.openjarvis/config.toml`:
