@@ -172,3 +172,49 @@ def test_real_model_adapter_converts_bytes_to_int16(monkeypatch) -> None:
     array = captured["array"]
     assert array.dtype == np.int16
     assert list(array) == [1, -2, 3, -4]
+
+
+def test_loader_falls_back_to_path_based_api(monkeypatch) -> None:
+    # openwakeword 0.4.x rejects ``wakeword_models`` (raising TypeError) and
+    # instead loads bundled ONNX files by path. The loader must adapt.
+    captured: dict[str, object] = {}
+
+    class _LegacyModel:
+        def __init__(self, **kwargs):
+            if "wakeword_models" in kwargs:
+                raise TypeError("unexpected keyword argument 'wakeword_models'")
+            captured["kwargs"] = kwargs
+
+        def predict(self, array):
+            return {"hey_jarvis_v0.1": 0.99}
+
+    fake_module = SimpleNamespace(
+        model=SimpleNamespace(Model=_LegacyModel),
+        models={"hey_jarvis": {"model_path": "/pkg/hey_jarvis_v0.1.onnx"}},
+    )
+    monkeypatch.setitem(sys.modules, "openwakeword", fake_module)
+    monkeypatch.setitem(sys.modules, "openwakeword.model", fake_module.model)
+
+    frame = b"\x00\x00" * 8
+    detector = WakeWordDetector(frame_source=lambda: iter([frame]), threshold=0.5)
+
+    assert detector.wait_for_wake() is True
+    assert captured["kwargs"] == {"wakeword_model_paths": ["/pkg/hey_jarvis_v0.1.onnx"]}
+
+
+def test_real_pretrained_hey_jarvis_model_loads_offline() -> None:
+    # Best-effort: when openwakeword is installed, the pretrained hey_jarvis
+    # ONNX model must load and score silence at ~0 without a mic or network.
+    pytest.importorskip("openwakeword")
+    np = pytest.importorskip("numpy")
+
+    frames = [np.zeros(1280, dtype=np.int16).tobytes() for _ in range(3)]
+    detector = WakeWordDetector(frame_source=lambda: iter(frames))
+
+    scores: list[float] = []
+    woke = detector.wait_for_wake(on_partial=scores.append)
+
+    assert detector._model is not None  # real backend constructed
+    assert len(scores) == 3
+    assert all(0.0 <= s <= 1.0 for s in scores)
+    assert woke is False  # silence must not trigger the wake word

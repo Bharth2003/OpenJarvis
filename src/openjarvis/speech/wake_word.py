@@ -14,6 +14,7 @@ default chunk is 1280 rather than voice_io's 1024.
 
 from __future__ import annotations
 
+import os
 from typing import Any, Callable, Iterable, Iterator, Mapping, Optional
 
 _SAMPLE_RATE = 16000
@@ -144,7 +145,15 @@ class WakeWordDetector:
         return self._model
 
     def _load_openwakeword_model(self) -> Any:
-        """Load the pretrained openwakeword model, importing it lazily."""
+        """Load the pretrained openwakeword model, importing it lazily.
+
+        openwakeword's constructor changed across releases: 0.5+ takes model
+        *names* (``wakeword_models=["hey_jarvis"]``, downloaded on demand),
+        while 0.4.x takes bundled ONNX *paths* (``wakeword_model_paths=[...]``).
+        0.6+ additionally requires tflite-runtime, which has no wheels for
+        Python 3.12+, so the 0.4.x ONNX path is what installs on newer Pythons.
+        We try the newer signature first and fall back to the path-based one.
+        """
         try:
             import openwakeword
             from openwakeword.model import Model
@@ -155,19 +164,50 @@ class WakeWordDetector:
                 "pip install 'OpenJarvis[wake]'"
             ) from exc
 
-        def _build() -> Any:
-            return Model(wakeword_models=[self._phrase], inference_framework="onnx")
+        return _OpenWakeWordModel(self._construct_openwakeword(openwakeword, Model))
 
+    def _construct_openwakeword(self, openwakeword: Any, model_cls: Any) -> Any:
+        """Build an openwakeword ``Model`` across supported API versions."""
         try:
-            oww = _build()
+            return model_cls(wakeword_models=[self._phrase], inference_framework="onnx")
+        except TypeError:
+            # Older (0.4.x) signature — no ``wakeword_models`` kwarg.
+            pass
         except Exception:
-            # Pretrained ONNX weights download on first use; fetch then retry.
+            # Newer versions download pretrained weights on first use.
+            download = getattr(
+                getattr(openwakeword, "utils", None), "download_models", None
+            )
+            if download is None:
+                raise
             try:
-                openwakeword.utils.download_models([self._phrase])
+                download([self._phrase])
             except Exception:
-                openwakeword.utils.download_models()
-            oww = _build()
-        return _OpenWakeWordModel(oww)
+                download()
+            return model_cls(wakeword_models=[self._phrase], inference_framework="onnx")
+
+        path = self._pretrained_model_path(openwakeword)
+        if path is not None:
+            return model_cls(wakeword_model_paths=[path])
+        # Last resort: load every bundled pretrained model.
+        return model_cls()
+
+    def _pretrained_model_path(self, openwakeword: Any) -> Optional[str]:
+        """Resolve the bundled ONNX path for the phrase (0.4.x pretrained set)."""
+        models = getattr(openwakeword, "models", None)
+        if isinstance(models, dict):
+            entry = models.get(self._phrase)
+            if isinstance(entry, dict) and entry.get("model_path"):
+                return entry["model_path"]
+        getter = getattr(openwakeword, "get_pretrained_model_paths", None)
+        if callable(getter):
+            try:
+                for candidate in getter():
+                    if self._phrase in os.path.basename(candidate):
+                        return candidate
+            except Exception:
+                pass
+        return None
 
     def _default_frame_source(self) -> Iterator[bytes]:
         """Yield microphone frames via sounddevice (imported lazily)."""
