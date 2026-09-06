@@ -13,7 +13,13 @@ from rich.markup import escape
 
 from openjarvis.cli._runtime_panel import runtime_cli_options
 from openjarvis.cli._tool_names import resolve_tool_names
-from openjarvis.cli._voice_chat import VOICE_EXIT, VoiceSession, read_voice_input, speak
+from openjarvis.cli._voice_chat import (
+    VOICE_EXIT,
+    VoiceSession,
+    read_voice_input,
+    record_voice,
+    speak,
+)
 from openjarvis.core.config import load_config
 from openjarvis.core.events import EventBus
 from openjarvis.core.types import Message, Role
@@ -78,6 +84,17 @@ def _read_input(prompt: str = "You> ") -> Optional[str]:
     default=False,
     help="Enable voice I/O: mic input with silence detection + TTS response playback.",
 )
+@click.option(
+    "--wake",
+    "--hey-jarvis",
+    "wake_mode",
+    is_flag=True,
+    default=False,
+    help=(
+        "Continuous offline wake word: say 'Hey Jarvis' to start each turn. "
+        "Implies --voice. Loops until Ctrl+C. Needs OpenJarvis[wake]."
+    ),
+)
 @runtime_cli_options
 def chat(
     engine_key: str | None,
@@ -88,6 +105,7 @@ def chat(
     system_prompt: str | None,
     persona_name: str | None,
     voice_mode: bool,
+    wake_mode: bool,
     num_ctx: int | None,
     num_gpu: int | None,
     skip_runtime_panel: bool,
@@ -109,8 +127,18 @@ def chat(
 
     Pass --voice to use microphone input (silence-detection) and hear responses
     read back via text-to-speech (kokoro local or OpenAI TTS).
+
+    Pass --wake (alias --hey-jarvis) for a hands-free loop: say "Hey Jarvis" to
+    wake it, speak your request, hear the answer, then it returns to listening.
+    This implies --voice and runs until Ctrl+C. Requires the wake extra
+    (``pip install 'OpenJarvis[wake]'``), which adds the offline openwakeword
+    "hey_jarvis" model.
     """
     console = Console(stderr=True)
+
+    # Wake mode is a superset of voice mode: it reuses the same STT/TTS turn,
+    # gated behind an offline wake-word listener.
+    voice_mode = voice_mode or wake_mode
 
     config = load_config()
     bus = EventBus(record_history=False)
@@ -263,13 +291,27 @@ def chat(
     # be layered independently. Loaded speech models live for this session.
     voice_session = VoiceSession(config) if voice_mode else None
 
+    # The wake-word listener is constructed lazily; the openwakeword model only
+    # loads on the first wait_for_wake() call.
+    wake_detector = None
+    if wake_mode:
+        from openjarvis.speech.wake_word import WakeWordDetector
+
+        wake_detector = WakeWordDetector()
+
     # Print banner
-    voice_hint = (
-        "  [magenta]Voice mode ON[/magenta] — type normally, or press Enter "
-        "to speak; silence stops recording.\n"
-        if voice_mode
-        else ""
-    )
+    if wake_mode:
+        voice_hint = (
+            "  [magenta]Wake mode ON[/magenta] — say 'Hey Jarvis' to speak; "
+            "silence stops recording. Ctrl+C to exit.\n"
+        )
+    elif voice_mode:
+        voice_hint = (
+            "  [magenta]Voice mode ON[/magenta] — type normally, or press Enter "
+            "to speak; silence stops recording.\n"
+        )
+    else:
+        voice_hint = ""
     console.print(
         f"[green bold]OpenJarvis Chat[/green bold]\n"
         f"  Engine: [cyan]{_safe_rich_label(engine_name)}[/cyan]  "
@@ -335,7 +377,30 @@ def chat(
         for note in _notifications.diff(get_status()):
             console.print(f"[dim cyan]{note}[/dim cyan]")
 
-        if voice_mode:
+        if wake_mode:
+            assert voice_session is not None and wake_detector is not None
+            console.print(
+                "[dim cyan]Waiting for 'Hey Jarvis'… (Ctrl+C to exit)[/dim cyan]"
+            )
+            try:
+                woke = wake_detector.wait_for_wake()
+            except Exception as exc:
+                # A missing wake extra or mic failure surfaces here; report it
+                # without leaking terminal control sequences, then exit.
+                console.print(f"[red]Wake word unavailable: {escape(str(exc))}[/red]")
+                break
+            if not woke:
+                console.print("\n[dim]Goodbye![/dim]")
+                break
+            console.print("[green bold]Hey Jarvis![/green bold] [dim]Listening…[/dim]")
+            result = record_voice(console, voice_session)
+            if result is VOICE_EXIT:
+                console.print("\n[dim]Goodbye![/dim]")
+                break
+            if result is None:
+                continue  # nothing heard, back to waiting for the wake word
+            user_input = result
+        elif voice_mode:
             assert voice_session is not None
             result = read_voice_input(console, voice_session)
             if result is VOICE_EXIT:

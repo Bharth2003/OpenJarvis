@@ -141,6 +141,13 @@ speech = [
     "soundfile>=0.12",
 ]
 speech-deepgram = ["deepgram-sdk>=3.0"]
+# Offline "Hey Jarvis" wake word. openwakeword ships a pretrained hey_jarvis
+# ONNX model that runs on onnxruntime, fully offline. The floor stays at 0.4
+# because 0.6+ requires tflite-runtime, which publishes no wheels for Python
+# 3.12+ (this project supports 3.10–3.13); the loader adapts to both the 0.4.x
+# path-based and 0.5+ name-based constructors. Pair with the `speech` extra for
+# the mic (sounddevice) and STT/TTS turn: `uv sync --extra wake --extra speech`.
+wake = ["openwakeword>=0.4"]
 eval-wandb = ["wandb>=0.17"]
 eval-sheets = ["gspread>=6.0", "google-auth>=2.0"]
 mining-pearl-cpu = [
