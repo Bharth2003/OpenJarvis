@@ -141,6 +141,10 @@ speech = [
     "soundfile>=0.12",
 ]
 speech-deepgram = ["deepgram-sdk>=3.0"]
+# Offline "Hey Jarvis" wake word. openwakeword ships the pretrained hey_jarvis
+# ONNX model and pulls onnxruntime. Pair with the `speech` extra for the mic
+# (sounddevice) and STT/TTS turn: `uv sync --extra wake --extra speech`.
+wake = ["openwakeword>=0.6"]
 eval-wandb = ["wandb>=0.17"]
 eval-sheets = ["gspread>=6.0", "google-auth>=2.0"]
 mining-pearl-cpu = [
