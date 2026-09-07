@@ -19,6 +19,7 @@ from openjarvis.cli._voice_chat import (
     read_voice_input,
     record_voice,
     speak,
+    wake_greeting_text,
 )
 from openjarvis.core.config import load_config
 from openjarvis.core.events import EventBus
@@ -95,6 +96,27 @@ def _read_input(prompt: str = "You> ") -> Optional[str]:
         "Implies --voice. Loops until Ctrl+C. Needs OpenJarvis[wake]."
     ),
 )
+@click.option(
+    "--clap",
+    "clap_mode",
+    is_flag=True,
+    default=False,
+    help=(
+        "Wake on a double clap instead of (or as well as) 'Hey Jarvis'. "
+        "Implies --voice. Combine with --wake to accept either trigger."
+    ),
+)
+@click.option(
+    "--cowork",
+    "cowork_mode",
+    is_flag=True,
+    default=False,
+    help=(
+        "Agentic research mode: orchestrator agent with web_search + visible "
+        "browser tools. Forces live tool use instead of guessing from memory. "
+        "Sets OPENJARVIS_BROWSER_HEADED so Chromium opens on screen."
+    ),
+)
 @runtime_cli_options
 def chat(
     engine_key: str | None,
@@ -106,6 +128,8 @@ def chat(
     persona_name: str | None,
     voice_mode: bool,
     wake_mode: bool,
+    clap_mode: bool,
+    cowork_mode: bool,
     num_ctx: int | None,
     num_gpu: int | None,
     skip_runtime_panel: bool,
@@ -130,15 +154,39 @@ def chat(
 
     Pass --wake (alias --hey-jarvis) for a hands-free loop: say "Hey Jarvis" to
     wake it, speak your request, hear the answer, then it returns to listening.
-    This implies --voice and runs until Ctrl+C. Requires the wake extra
-    (``pip install 'OpenJarvis[wake]'``), which adds the offline openwakeword
-    "hey_jarvis" model.
+    Pass --clap to wake on a double clap. Both imply --voice.
+
+    Pass --cowork for agentic research (orchestrator + web_search + visible
+    browser). Jarvis must call tools — it will not invent answers from memory.
     """
     console = Console(stderr=True)
 
-    # Wake mode is a superset of voice mode: it reuses the same STT/TTS turn,
-    # gated behind an offline wake-word listener.
-    voice_mode = voice_mode or wake_mode
+    # Wake / clap modes are supersets of voice mode.
+    hands_free = wake_mode or clap_mode
+    voice_mode = voice_mode or hands_free
+
+    # Cowork: force visible browser + tool-using orchestrator.
+    if cowork_mode:
+        import os as _os
+
+        _os.environ.setdefault("OPENJARVIS_BROWSER_HEADED", "1")
+        if not agent_name:
+            agent_name = "orchestrator"
+        if not tools:
+            tools = (
+                "web_search,browser_navigate,browser_click,browser_type,"
+                "browser_extract,browser_screenshot,think"
+            )
+        if not system_prompt:
+            system_prompt = (
+                "You are Jarvis, Bharth's local cowork assistant. You MUST use "
+                "tools for any factual, current, or web question — never invent "
+                "or recall answers from training data. Workflow: (1) call "
+                "web_search or browser_navigate to open a real page the user can "
+                "see, (2) extract or read the page with browser_extract, (3) "
+                "summarize only what the tools returned, with sources. If a tool "
+                "fails, say so and try another. Be concise when speaking."
+            )
 
     config = load_config()
     bus = EventBus(record_history=False)
@@ -249,7 +297,12 @@ def chat(
                                     tool_instances.append(tcls)
                         if tool_instances:
                             kwargs["tools"] = tool_instances
-                    kwargs["max_turns"] = config.agent.max_turns
+                    # Cowork research needs more tool hops than a simple chat.
+                    kwargs["max_turns"] = (
+                        max(config.agent.max_turns, 12)
+                        if cowork_mode
+                        else config.agent.max_turns
+                    )
 
                     def _confirm(prompt: str) -> bool:
                         console.print(
@@ -291,20 +344,35 @@ def chat(
     # be layered independently. Loaded speech models live for this session.
     voice_session = VoiceSession(config) if voice_mode else None
 
-    # The wake-word listener is constructed lazily; the openwakeword model only
-    # loads on the first wait_for_wake() call.
+    # Hands-free listeners: wake word and/or double clap.
     wake_detector = None
+    clap_detector = None
     if wake_mode:
         from openjarvis.speech.wake_word import WakeWordDetector
 
         wake_detector = WakeWordDetector()
+    if clap_mode:
+        from openjarvis.speech.clap_detect import ClapDetector
+
+        clap_detector = ClapDetector()
 
     # Print banner
-    if wake_mode:
+    if hands_free:
+        triggers = []
+        if wake_mode:
+            triggers.append("'Hey Jarvis'")
+        if clap_mode:
+            triggers.append("double clap")
+        trigger_txt = " or ".join(triggers)
         voice_hint = (
-            "  [magenta]Wake mode ON[/magenta] — say 'Hey Jarvis' to speak; "
-            "silence stops recording. Ctrl+C to exit.\n"
+            f"  [magenta]Hands-free ON[/magenta] — {trigger_txt} to speak; "
+            "Jarvis greets you, then silence stops recording. Ctrl+C to exit.\n"
         )
+        if cowork_mode:
+            voice_hint += (
+                "  [magenta]Cowork ON[/magenta] — visible browser + live search; "
+                "tools are required for factual answers.\n"
+            )
     elif voice_mode:
         voice_hint = (
             "  [magenta]Voice mode ON[/magenta] — type normally, or press Enter "
@@ -312,6 +380,10 @@ def chat(
         )
     else:
         voice_hint = ""
+        if cowork_mode:
+            voice_hint = (
+                "  [magenta]Cowork ON[/magenta] — visible browser + live search.\n"
+            )
     console.print(
         f"[green bold]OpenJarvis Chat[/green bold]\n"
         f"  Engine: [cyan]{_safe_rich_label(engine_name)}[/cyan]  "
@@ -377,28 +449,48 @@ def chat(
         for note in _notifications.diff(get_status()):
             console.print(f"[dim cyan]{note}[/dim cyan]")
 
-        if wake_mode:
-            assert voice_session is not None and wake_detector is not None
+        if hands_free:
+            assert voice_session is not None
+            waiting_bits = []
+            if wake_mode:
+                waiting_bits.append("'Hey Jarvis'")
+            if clap_mode:
+                waiting_bits.append("double clap")
             console.print(
-                "[dim cyan]Waiting for 'Hey Jarvis'… (Ctrl+C to exit)[/dim cyan]"
+                "[dim cyan]Waiting for "
+                + " / ".join(waiting_bits)
+                + "… (Ctrl+C to exit)[/dim cyan]"
             )
+            woke = False
             try:
-                woke = wake_detector.wait_for_wake()
+                # Mic is exclusive — when both flags are set, prefer clap.
+                if clap_mode and clap_detector is not None:
+                    if wake_mode:
+                        console.print(
+                            "[dim]Both --clap and --wake set; using double clap "
+                            "(mic is exclusive).[/dim]"
+                        )
+                    woke = clap_detector.wait_for_clap()
+                elif wake_mode and wake_detector is not None:
+                    woke = wake_detector.wait_for_wake()
             except Exception as exc:
-                # A missing wake extra or mic failure surfaces here; report it
-                # without leaking terminal control sequences, then exit.
-                console.print(f"[red]Wake word unavailable: {escape(str(exc))}[/red]")
+                console.print(f"[red]Wake unavailable: {escape(str(exc))}[/red]")
                 break
             if not woke:
                 console.print("\n[dim]Goodbye![/dim]")
                 break
-            console.print("[green bold]Hey Jarvis![/green bold] [dim]Listening…[/dim]")
+
+            greeting = wake_greeting_text()
+            console.print(
+                f"[green bold]{escape(greeting)}[/green bold] [dim]Listening…[/dim]"
+            )
+            speak(greeting, console, voice_session)
             result = record_voice(console, voice_session)
             if result is VOICE_EXIT:
                 console.print("\n[dim]Goodbye![/dim]")
                 break
             if result is None:
-                continue  # nothing heard, back to waiting for the wake word
+                continue  # nothing heard, back to waiting
             user_input = result
         elif voice_mode:
             assert voice_session is not None
