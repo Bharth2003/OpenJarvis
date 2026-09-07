@@ -10,6 +10,37 @@ from openjarvis.core.types import ToolResult
 from openjarvis.tools._stubs import BaseTool, ToolSpec
 
 
+def _resolve_headless() -> bool:
+    """Decide whether Playwright runs headless.
+
+    Preference order:
+    1. ``OPENJARVIS_BROWSER_HEADED=1`` (or ``true``/``yes``) → headed (visible).
+    2. ``OPENJARVIS_BROWSER_HEADLESS=0`` → headed; ``=1`` → headless.
+    3. ``config.tools.browser.headless`` from ``~/.openjarvis/config.toml``.
+    4. Default ``True`` (headless) for CI / servers.
+    """
+    import os
+
+    headed_env = os.environ.get("OPENJARVIS_BROWSER_HEADED", "").strip().lower()
+    if headed_env in ("1", "true", "yes", "on"):
+        return False
+    if headed_env in ("0", "false", "no", "off"):
+        return True
+
+    headless_env = os.environ.get("OPENJARVIS_BROWSER_HEADLESS", "").strip().lower()
+    if headless_env in ("0", "false", "no", "off"):
+        return False
+    if headless_env in ("1", "true", "yes", "on"):
+        return True
+
+    try:
+        from openjarvis.core.config import load_config
+
+        return bool(load_config().tools.browser.headless)
+    except Exception:
+        return True
+
+
 class _BrowserSession:
     """Manages a shared Playwright browser session (lazy init)."""
 
@@ -27,9 +58,26 @@ class _BrowserSession:
             raise ImportError(
                 "playwright not installed. Install with: uv sync --extra browser"
             )
+        headless = _resolve_headless()
         self._playwright = sync_playwright().start()
-        self._browser = self._playwright.chromium.launch(headless=True)
-        self._page = self._browser.new_page()
+        # slow_mo makes clicks/navigations visible when headed ("cowork" browsing).
+        launch_kwargs: dict = {"headless": headless}
+        if not headless:
+            launch_kwargs["slow_mo"] = 50
+        self._browser = self._playwright.chromium.launch(**launch_kwargs)
+        try:
+            from openjarvis.core.config import load_config
+
+            cfg = load_config().tools.browser
+            self._page = self._browser.new_page(
+                viewport={
+                    "width": cfg.viewport_width,
+                    "height": cfg.viewport_height,
+                }
+            )
+            self._page.set_default_timeout(cfg.timeout_ms)
+        except Exception:
+            self._page = self._browser.new_page()
 
     @property
     def page(self):

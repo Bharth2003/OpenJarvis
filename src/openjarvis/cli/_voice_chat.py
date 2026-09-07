@@ -112,7 +112,28 @@ def record_voice(
 
     console.print("[dim]Transcribing…[/dim]")
     try:
-        result = backend.transcribe(audio_bytes, format="wav")
+        language = None
+        if active_session._config is not None:
+            language = (
+                getattr(
+                    getattr(active_session._config, "speech", None), "language", None
+                )
+                or None
+            )
+            if isinstance(language, str):
+                language = language.strip() or None
+        else:
+            try:
+                from openjarvis.core.config import load_config
+
+                language = load_config().speech.language.strip() or None
+            except Exception:
+                language = None
+        # Default to English when unset — auto-detect often mis-hears short
+        # commands on CPU-sized Whisper models.
+        if not language:
+            language = "en"
+        result = backend.transcribe(audio_bytes, format="wav", language=language)
         text = result.text.strip()
         if text:
             console.print(f"[bold]You (voice):[/bold] {_terminal_safe_text(text)}")
@@ -144,4 +165,24 @@ def speak(text: str, console: Any, session: VoiceSession | None = None) -> None:
     )
 
 
-__all__ = ["VOICE_EXIT", "VoiceSession", "read_voice_input", "record_voice", "speak"]
+# Spoken greeting after wake (clap / Hey Jarvis). Overridable via env.
+DEFAULT_WAKE_GREETING = "Hey Bharth, how can I help you?"
+
+
+def wake_greeting_text() -> str:
+    """Return the spoken wake greeting (env ``OPENJARVIS_WAKE_GREETING`` wins)."""
+    import os
+
+    custom = os.environ.get("OPENJARVIS_WAKE_GREETING", "").strip()
+    return custom or DEFAULT_WAKE_GREETING
+
+
+__all__ = [
+    "VOICE_EXIT",
+    "VoiceSession",
+    "read_voice_input",
+    "record_voice",
+    "speak",
+    "DEFAULT_WAKE_GREETING",
+    "wake_greeting_text",
+]

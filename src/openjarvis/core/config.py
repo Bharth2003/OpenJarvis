@@ -2203,7 +2203,7 @@ max_facts = 1000              # cap on stored facts
 enabled = true
 
 # [tools.browser]
-# headless = true
+# headless = false            # false = show Chromium on screen (cowork browsing)
 # timeout_ms = 30000
 # viewport_width = 1280
 # viewport_height = 720

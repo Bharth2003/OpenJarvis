@@ -52,12 +52,23 @@ def _engine_and_config():
     return engine, config
 
 
+def _reply_speaks(speak_mock) -> list:
+    """Return speak() calls that are the agent reply (not the wake greeting)."""
+    return [
+        c
+        for c in speak_mock.call_args_list
+        if c.args and c.args[0] != "Hey Bharth, how can I help you?"
+    ]
+
+
 class TestWakeFlag:
     def test_help_lists_wake_option(self) -> None:
         result = CliRunner().invoke(chat, ["--help"])
         assert result.exit_code == 0
         assert "--wake" in result.output
         assert "--hey-jarvis" in result.output
+        assert "--clap" in result.output
+        assert "--cowork" in result.output
 
     def test_wake_implies_voice_banner(self) -> None:
         engine, config = _engine_and_config()
@@ -68,7 +79,7 @@ class TestWakeFlag:
             result = CliRunner().invoke(chat, ["--wake", "--model", "test-model"])
 
         assert result.exit_code == 0
-        assert "Wake mode ON" in result.output
+        assert "Hands-free ON" in result.output
         record.assert_not_called()
         assert "Goodbye!" in result.output
 
@@ -76,7 +87,6 @@ class TestWakeFlag:
 class TestWakeCycle:
     def test_full_cycle_then_returns_to_waiting(self) -> None:
         engine, config = _engine_and_config()
-        # Wake once (run a turn), then a False wait ends the loop cleanly.
         detector = _FakeDetector([True, False])
 
         with ExitStack() as stack:
@@ -92,13 +102,14 @@ class TestWakeCycle:
 
         assert result.exit_code == 0
         assert result.exception is None
-        # Waited twice: fired the turn, then re-armed and exited.
         assert detector.waits == 2
         record.assert_called_once()
         engine.generate.assert_called_once()
-        speak.assert_called_once()
-        assert "hi there" in speak.call_args.args[0]
-        assert "Hey Jarvis!" in result.output
+        # Greeting + reply
+        assert speak.call_count == 2
+        assert "Hey Bharth" in speak.call_args_list[0].args[0]
+        assert "hi there" in _reply_speaks(speak)[0].args[0]
+        assert "Hey Bharth" in result.output
         assert "hi there" in result.output
         assert "Goodbye!" in result.output
 
@@ -116,13 +127,12 @@ class TestWakeCycle:
 
         assert result.exit_code == 0
         engine.generate.assert_called_once()
-        speak.assert_called_once()
+        assert speak.call_count == 2  # greeting + reply
 
     def test_nothing_heard_returns_to_waiting(self) -> None:
         engine, config = _engine_and_config()
         detector = _FakeDetector([True, True, False])
 
-        # First wake yields no transcript (None); second wake yields text.
         with ExitStack() as stack:
             _enter_base_patches(stack, engine, config, detector)
             record = stack.enter_context(
@@ -136,14 +146,16 @@ class TestWakeCycle:
 
         assert result.exit_code == 0
         assert record.call_count == 2
-        engine.generate.assert_called_once()  # only the turn that heard speech
-        speak.assert_called_once()
+        engine.generate.assert_called_once()
+        # Two greetings (one per wake) + one reply
+        assert speak.call_count == 3
+        assert len(_reply_speaks(speak)) == 1
 
 
 class TestWakeExit:
     def test_wake_interrupt_exits_before_recording(self) -> None:
         engine, config = _engine_and_config()
-        detector = _FakeDetector([False])  # Ctrl+C-equivalent
+        detector = _FakeDetector([False])
 
         with ExitStack() as stack:
             _enter_base_patches(stack, engine, config, detector)
@@ -171,7 +183,9 @@ class TestWakeExit:
 
         assert result.exit_code == 0
         engine.generate.assert_not_called()
-        speak.assert_not_called()
+        # Greeting played before record_voice returned EXIT
+        assert speak.call_count == 1
+        assert "Hey Bharth" in speak.call_args.args[0]
         assert "Goodbye!" in result.output
 
     def test_missing_wake_extra_reports_and_exits(self) -> None:
@@ -191,5 +205,5 @@ class TestWakeExit:
         assert result.exit_code == 0
         assert result.exception is None
         record.assert_not_called()
-        assert "Wake word unavailable" in result.output
+        assert "Wake unavailable" in result.output
         assert "OpenJarvis[wake]" in result.output

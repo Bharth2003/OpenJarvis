@@ -1,0 +1,41 @@
+# Cowork voice assistant — visible browser + live search + hands-free wake.
+# Copy to ~/.openjarvis/config.toml (or merge the sections you want).
+#
+# Start:
+#   jarvis chat --clap --cowork -m qwen3.5:2b
+#   jarvis chat --wake --cowork -m qwen3:8b
+#
+# Speak after the greeting. Jarvis must call tools for factual answers and
+# Chromium opens on screen (headed) so you can watch it browse.
+
+[engine]
+default = "ollama"
+
+[intelligence]
+default_model = "qwen3.5:2b"   # Fast on CPU. Use qwen3:8b for stronger tool-use.
+temperature = 0.4
+
+[agent]
+default_agent = "orchestrator"
+max_turns = 12
+tools = "web_search,browser_navigate,browser_click,browser_type,browser_extract,browser_screenshot,think"
+system_prompt = """You are Jarvis, Bharth's local cowork assistant. You MUST use tools for any factual, current, or web question — never invent answers from training data. Workflow: (1) call web_search or browser_navigate so a real page opens on screen, (2) browser_extract what you need, (3) summarize only tool results with sources. Be concise when speaking."""
+
+[tools]
+enabled = "web_search,browser_navigate,browser_click,browser_type,browser_extract,browser_screenshot,think"
+
+[tools.browser]
+headless = false               # Show Chromium so you can watch live browsing
+timeout_ms = 45000
+viewport_width = 1280
+viewport_height = 720
+
+[speech]
+backend = "faster-whisper"
+model = "small"                # Better accuracy than base (slower on CPU)
+language = "en"                # Lock language — big accuracy win
+device = "cpu"
+compute_type = "int8"
+
+[security]
+profile = "personal"
